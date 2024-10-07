@@ -22,7 +22,14 @@ knitr::opts_chunk$set(warning = FALSE, cache = TRUE)
 
 # Before starting
 
-Prior to the analyzes, we recommend all users to check the latest version of R at http://www.r-project.org/ and to make sure that they are using the updated versions of their installed R packages.
+Prior to the analyzes, we recommend all users to use the renv package to 
+reinstall the specific package versions recorded in the lockfile (see: https://rstudio.github.io/renv/).
+```{r, echo = false}
+install.packages("renv")
+renv::restore()
+```
+
+
 
 The analysis presented here makes use of the following R packages available at CRAN. 
 Once installed, load them.
