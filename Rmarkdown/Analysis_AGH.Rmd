@@ -1,0 +1,508 @@
+---
+title: "Oxytrigona analysis"
+author: "Prof. Dr. Bruno Vilela - UFBA | IBio"
+date: 'laste updated 07-oct-2024'
+output: pdf_document
+editor_options:
+  chunk_output_type: console
+tags:
+- Niche overlap
+- R
+- Rasters
+- Shapefiles
+categories: macroecology
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, cache = TRUE)
+```
+
+
+
+# Before starting
+
+Prior to the analyzes, we recommend all users to check the latest version of R at http://www.r-project.org/ and to make sure that they are using the updated versions of their installed R packages.
+
+The analysis presented here makes use of the following R packages available at CRAN. 
+Once installed, load them.
+```{r load_packages, message = FALSE, warning = FALSE}
+# Load packages
+library(knitr)
+library(sp)
+library(ecospat)
+library(here)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(stars)
+library(readxl)
+library(colorspace)
+library(geodata)
+library(ade4)
+```
+
+# Data 
+
+## Load the occurrence records
+Load the occurrence records into the R environment.
+```{r load_occurrence_points}
+occ.points <- read_excel(here("Data",
+                              "occurrences.xlsx"))
+occ.points <- distinct(occ.points)
+```
+
+The loaded table includes `r nrow(occ.points)` occurrence records.
+
+Now we create a list of occurrences per species.
+```{r}
+species <- unique(occ.points$Species)
+
+occ.points.list <- list()
+for (i in seq_along(species)) {
+  occ.points.list[[i]] <- as.data.frame(occ.points[occ.points$Species == species[i], 2:3])
+}
+names(occ.points.list) <- species
+```
+
+## Define the regions to be tested
+The first step is to define the number of groups (regions) to be tested. In the follow case we choose 3 groups.
+```{r Number_of_groups}
+n.groups <- 3
+```
+
+Now define the name of the groups, in the same geographical order of the groups, starting from the west to east. You can also define the codes to be used in the tables.
+```{r group_names}
+g.names <- species
+
+g.codenames <- g.names
+```
+
+It is also necessary to set what colors will be used in the next plots for each group (using the same order as the names). Change the colors according to your preferences.
+```{r group_colors}
+g.colors <- c('#1b9e77','#d95f02','#7570b3')
+```
+
+
+To check the distribution of the occurrence records we map them.
+```{r first_plot, fig.width = 16, fig.height = 9}
+occ.points.list2 <- do.call(rbind, occ.points.list) %>%
+  tibble::rownames_to_column(var = "species") %>%
+  mutate(species = gsub("\\..*", "", species),
+         species = factor(species, g.names))
+world <- ne_countries(scale = "medium", returnclass = "sf")
+limits <- range(occ.points.list2$Longitude)
+lat_limits <- range(occ.points.list2$Latitude)
+g <- ggplot() +
+  geom_sf(data = world) +
+   theme_minimal() +
+  geom_point(occ.points.list2, mapping = aes(Longitude, Latitude,
+                                             col = species,
+                                             shape = species),
+             size = 3) +
+  scale_color_manual(values = g.colors) +
+  xlab("") +
+  ylab("") +
+  coord_sf(xlim = limits, ylim = lat_limits) +
+
+  theme(
+    strip.text = element_text(face = "italic"),
+    legend.text = element_text(face = "italic"),
+    legend.position = "none"
+  )
+# Inset map
+south_america <- st_crop(world, xmin = -92, xmax = -34, ymin = -56, ymax = 13)
+
+inset_map <- ggplot() +
+  geom_sf(data = south_america) +
+  geom_rect(aes(xmin = min(limits), xmax = max(limits), ymin = min(lat_limits), ymax = max(lat_limits)),
+            fill = NA, color = "red") +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+# Add inset map
+g1 <- g + 
+  annotation_custom(grob = ggplotGrob(inset_map), 
+                    xmin = min(limits) - 1, xmax = min(limits) + diff(limits)/3.5,
+                    ymin = (max(lat_limits) - diff(lat_limits)/3.5) + 2, ymax = (max(lat_limits)) + 2) +
+  facet_wrap(species ~ ., ncol = 3)
+
+g1
+loc <- here("Figures", "Figure1.tiff")
+ggsave(loc, g1)
+
+```
+
+Filter points to the countries defined.
+```{r}
+map <- world[world$name %in% c("Brazil"), ] 
+
+pnts_sf <- st_as_sf(occ.points.list2,
+                    coords = c('Longitude', 'Latitude'),
+                    crs = st_crs(map))
+
+pnts <- pnts_sf %>%
+  mutate(intersection = as.integer(st_intersects(geometry, map)))
+
+remove <- is.na(pnts$intersection)
+occ.points.list3 <- occ.points.list2[!remove, ]
+
+g <- ggplot() +
+  geom_sf(data = filter(world, iso_a3  == "BRA")) +
+   theme_minimal() +
+  geom_point(occ.points.list3, mapping = aes(Longitude, Latitude,
+                                             col = species,
+                                             shape = species),
+             size = 2) +
+  scale_color_manual(values = g.colors) +
+  xlab("") +
+  ylab("") +
+  theme(
+    strip.text = element_text(face = "italic"),
+    legend.text = element_text(face = "italic"),
+    legend.position = "none",
+     axis.text.x = element_text(angle = 45, hjust = 1))
+
+g1 <- g + facet_wrap(species ~ ., ncol = 3)
+g1
+loc <- here("Figures", "Figure2.tiff")
+ggsave(loc, g1)
+
+```
+
+
+## Background definition
+
+An important step in the niche analysis is the definition of the background. Here we applied a background based on a minimum convex polygon (MCP) made from the occurrence records of each group. Additionally to the MCP we add a buffer around it.
+The polygon buffer size for the background (in degrees) can be changed below. We chose 2 degrees based on the species dispersion.
+```{r buffer_size}
+buffer.size <- 2
+```
+
+We define a minimum convex polygon (MCP) function below (this function was obtained from https://github.com/ndimhypervol/wallace). 
+```{r mcp_function}
+mcp <- function(xy) {
+  hull <- xy %>% 
+    st_as_sf(coords = c("Longitude", "Latitude")) %>% 
+    st_union() %>% 
+    st_convex_hull()
+  return(hull)
+}
+
+```
+
+
+## Enviromnental variables
+
+The environmental variables used are available at the WorldClim website (http://www.worldclim.org). Download all the 19 bioclimatic ('Biolclim') variables for the current conditions (we used the resolution of 10 arc-min) with the code below. Note you need to have the internet on. The download files are opened directed in the R environment, but they are also saved in your work directory (to see where it is, use `getwd()`).
+```{r download_variables}
+variables <- worldclim_global("bio", res = 10, "pres")
+```
+
+You can also check the variables, by mapping them.
+```{r plot_variables, fig.width = 10, fig.height = 10}
+plot(variables)
+```
+
+
+## Group assigning
+
+Once, we have the occurrence data, the environmental data, the defined groups and their background parameters chosen, we can prepare the data for the analysis.
+Below we use the occurrence points to generate the MCP plus a buffer defined by the user for the background (see above). Next, the variable values per group are extracted from the species occurrence points and from the background (defined above). Finally we plot the resulting groups with their respective backgrounds.
+```{r group_assinging, fig.width = 16, fig.height = 9, warning = FALSE, cache = TRUE}
+# Empty objects
+g.assign <- occ.points.list3$species
+xy.mcp <- list()
+back.env <- list()
+spec.env <- list()
+row.sp <- list()
+
+united <- st_union(st_make_valid(world))
+
+# Loop
+for (i in 1:n.groups) {
+  # Save row numbers per species
+  g.limit <- g.assign == species[i]
+  row.sp[[i]] <- which(g.limit)
+  
+  # Background polygon
+  mcp.occ <- mcp(occ.points.list3[g.limit, -1])
+  xy.mcp.i <- st_buffer(mcp.occ, dist = buffer.size)
+  st_crs(xy.mcp.i) <- st_crs(united)
+  xy.mcp[[i]] <-  st_as_sf(st_intersection(xy.mcp.i, united))
+  xy.mcp[[i]]$species <- species[i]
+  # Background environment
+  extract_temp <- terra::extract(variables, xy.mcp[[i]])[, -1]
+  back.env[[i]] <- na.exclude(extract_temp)
+  # Species environment
+  spec.env[[i]] <- na.exclude(terra::extract(variables, 
+                                      occ.points.list3[g.limit, -1])[, -1])
+}
+```
+
+Map buffers:
+```{r}
+xy.mcp.is <- do.call(rbind, xy.mcp)
+xy.mcp.is$species <- factor(xy.mcp.is$species, xy.mcp.is$species)
+
+g <- ggplot() +
+  geom_sf(data = filter(world, iso_a3  == "BRA")) +
+   theme_minimal() +
+  geom_sf(data = xy.mcp.is, aes(col = species)) +
+  geom_point(occ.points.list3, mapping = aes(Longitude, Latitude,
+                                             col = species,
+                                             shape = species),
+             size = .3) +
+  scale_color_manual(values = g.colors) +
+  xlab("") +
+  ylab("") +
+  theme(
+    strip.text = element_text(face = "italic"),
+    legend.text = element_text(face = "italic"),
+    legend.position = "none",
+     axis.text.x = element_text(angle = 45, hjust = 1))
+g1 <- g + facet_wrap(species ~ ., ncol = 3)
+g1
+loc <- here("Figures", "Figure.tiff")
+ggsave(loc, g1)
+```
+
+Save the occurrence points table.
+```{r}
+write.csv(occ.points.list3, 
+          file = here("Data", "occurrences.csv"),
+          row.names = FALSE)
+```
+
+
+
+Now we organize the final tables to be used. 
+```{r final_data}
+# Occurrence points per group
+g.occ.points <- occ.points.list3
+colnames(g.occ.points)[1] <- "Groups"
+# Environmental values for the background 
+all.back.env <- do.call(rbind.data.frame, back.env)
+# Environmental values for the species occurrence points 
+all.spec.env <- do.call(rbind.data.frame, spec.env)
+# Environmental values all together
+data.env <- rbind(all.spec.env, all.back.env) 
+```
+
+Check the number of occurrence records per region.
+```{r n_region, results = "asis"}
+table(g.occ.points[, 1])
+```
+
+# Niche comparissons
+
+The niche analyzes and comparisons follow the framework developed by Broennimann et al. (2012) and its derivations (see methods section in the manuscript).  
+
+## PCA
+
+We chose to apply a PCA (Principal Component Analysis) considering all the environments together, as it presented the best performance when comparing the niches (Broennimann et al., 2012). 
+```{r pca}
+# Weight matrix
+w <- c(rep(0, nrow(all.spec.env)), rep(1, nrow(all.back.env)))
+# PCA of all environment
+pca.cal <- dudi.pca(data.env, row.w = w, center = TRUE, 
+                    scale = TRUE, scannf = FALSE, nf = 2)
+```
+
+Once we have the pca results, we need the first and second eigenvector values for the background and for the occurrence records per group.
+```{r get_pca_values}
+# Rows in data corresponding to sp1
+adtion <- cumsum(c(0, sapply(back.env, nrow)))
+begnd <- nrow(all.spec.env)
+# Empty list to save the results
+scores.back <- list()
+scores.spec <- list()
+
+# Assigning the values 
+for (i in 1:n.groups) {
+  scores.spec[[i]] <- pca.cal$li[row.sp[[i]], ]
+  pos <- (begnd[1] + adtion[i] + 1) : (begnd[1] + adtion[i + 1])
+  scores.back[[i]] <- pca.cal$li[pos, ]  
+}
+
+total.scores.back <- do.call(rbind.data.frame, scores.back)
+```
+
+
+## Environmental space
+
+An environmental space is generated based on the pca values calculated for the background and the occurrence records. We defined the resolution of this two-dimensional space grid below. 
+```{r resolution_env}
+R <- 100
+```
+
+Next, we modeled the species density in the environmental grid, considering the observed occurrence density and the availability of the conditions in the background.
+```{r env_model_density_z}
+z <- list()
+
+for (i in 1:n.groups) {
+  z[[i]] <- ecospat.grid.clim.dyn(total.scores.back,
+                                  scores.back[[i]],
+                                  scores.spec[[i]],
+                                  R = R)
+}
+
+```
+
+## Niche overlap
+
+For the niche overlap, we calculate the D metric and its significance, using a similarity test. We define the number of interactions for the similarity test below (see the methods section in the manuscript for details). 
+```{r repetition_number}
+rep <- 100
+```
+
+Once the number of interactions is defined, we can generate the values. Additionally, we calculate the partition of the non-overlapped niche, among niche unfilling, expansion and stability (see methods in the manuscript). 
+```{r niche_metrics, cache = TRUE}
+# Empty matrices
+D <- matrix(nrow = n.groups, ncol = n.groups)
+rownames(D) <- colnames(D) <- g.codenames
+unfilling <- stability <- expansion <- sim <- D
+
+for (i in 2:n.groups) {
+  
+  for (j in 1:(i - 1)) {
+    
+    x1 <- z[[i]]
+    x2 <- z[[j]]
+    
+    # Niche overlap
+    D[i, j] <- ecospat.niche.overlap(x1, x2, cor = TRUE)$D
+    
+    # Niche similarity 
+    sim[i, j] <- ecospat.niche.similarity.test(x1, x2, rep)$p.D
+    sim[j, i] <- ecospat.niche.similarity.test(x2, x1, rep)$p.D
+    
+    # Niche Expansion, Stability, and Unfilling
+    index1 <- ecospat.niche.dyn.index(x1, x2)$dynamic.index.w
+    index2 <- ecospat.niche.dyn.index(x2, x1)$dynamic.index.w
+    expansion[i, j] <- index1[1]
+    stability[i, j] <- index1[2]
+    unfilling[i, j] <- index1[3]
+    expansion[j, i] <- index2[1]
+    stability[j, i] <- index2[2]
+    unfilling[j, i] <- index2[3]
+  }
+}
+
+```
+
+
+## Numeric results
+
+Below we present the results for each metric, among all the groups.
+
+D value:
+```{r}
+kable(D, digits = 3, format = "markdown")
+```
+
+Niche similarity null model (p-values):
+```{r}
+kable(sim, digits = 3, format = "markdown")
+```
+
+Niche Unfilling:
+```{r}
+kable(unfilling, digits = 3,  format = "markdown")
+```
+
+Niche Expansion: 
+```{r}
+kable(expansion, digits = 3,  format = "markdown")
+```
+
+Niche Stability:
+```{r}
+kable(stability, digits = 3,  format = "markdown")
+```
+
+
+## Figure results
+
+### Multiple niche plots
+
+Regular plot:
+```{r, fig.width = 8, fig.height = 8, fig.show = "hold"}
+col1 <- colorRampPalette(c(desaturate(g.colors[1]), g.colors[1]))(5)
+col2 <- colorRampPalette(c(desaturate(g.colors[2]), g.colors[2]))(5)
+col3 <- colorRampPalette(c(desaturate(g.colors[3]), g.colors[3]))(5)
+col_int <- colorRampPalette(c(desaturate('#e7298a'), '#e7298a'))(5)
+ecospat.plot.niche.dyn(z[[1]], z[[2]], .5, 
+                       colZ1 = g.colors[1],
+                       colZ2 = g.colors[2],
+                       colinter = adjustcolor(col_int, .4),
+                       colz1 = adjustcolor(col1, .4),
+                       colz2 = adjustcolor(col2, .4),
+                       name.axis1 = "PC1",
+                       name.axis2 = "PC2")
+mtext(paste(species[1],"x", species[2]), font = 3)
+```
+
+
+```{r, fig.width = 8, fig.height = 8, fig.show = "hold"}
+ecospat.plot.niche.dyn(z[[1]], z[[3]], .5, 
+                       colZ1 = g.colors[1],
+                       colZ2 = g.colors[3],
+                       colinter = adjustcolor(col_int, .4),
+                       colz1 = adjustcolor(col1, .4),
+                       colz2 = adjustcolor(col3, .4),
+                       name.axis1 = "PC1",
+                       name.axis2 = "PC2")
+mtext(paste(species[1],"x", species[3]), font = 3)
+```
+
+```{r, fig.width = 8, fig.height = 8, fig.show = "hold"}
+ecospat.plot.niche.dyn(z[[2]], z[[3]], .5, 
+                       colZ1 = g.colors[2],
+                       colZ2 = g.colors[3],
+                       colinter = adjustcolor(col_int, .4),
+                       colz1 = adjustcolor(col2, .4),
+                       colz2 = adjustcolor(col3, .4),
+                       name.axis1 = "PC1",
+                       name.axis2 = "PC2")
+mtext(paste(species[2],"x", species[3]), font = 3)
+```
+
+Below the loadings plot (contribution of the variables for each axis). Check the variable codes at http://www.worldclim.org/bioclim.
+```{r, fig.width = 8, fig.height = 8, fig.show = "hold"}
+
+loadings <- cbind(cor(data.env, pca.cal$tab[,1]), cor(data.env, pca.cal$tab[,2]))
+colnames(loadings) <- c("axis1", "axis2")
+loadings <- loadings[c(1, 12:19, 2:11), ]
+
+barplot(loadings[,1], las=2, main="PC1")
+
+barplot(loadings[,2], las=2, main="PC2")
+```
+
+The arrows representing the contribution of each variable, directly on the environmental space.
+```{r, fig.width = 8, fig.height = 8}
+
+contrib <- pca.cal$co
+eigen <- pca.cal$eig
+nomes <- numeric(19)
+for(i in 1:19){
+  nomes[i] <- paste('bio',i, sep="")
+}
+s.corcircle(contrib[, 1:2] / max(abs(contrib[, 1:2])), 
+            grid = F,  label = nomes, clabel = 1.2)
+text(0, -1.1, paste("PC1 (", round(eigen[1]/sum(eigen)*100,2),"%)",
+                    sep = ""))
+text(1.1, 0, paste("PC2 (", round(eigen[2]/sum(eigen)*100,2),"%)",
+                   sep = ""), srt = 90)
+
+```
+
+
+# References
+Aiello‐Lammens, M. E., Boria, R. A., Radosavljevic, A., Vilela, B., & Anderson, R. P. (2015). spThin: an R package for spatial thinning of species occurrence records for use in ecological niche models. Ecography, 38(5), 541-545.
+
+Broennimann, O., Fitzpatrick, M. C., Pearman, P. B., Petitpierre, B., Pellissier, L., Yoccoz, N. G., & Guisan, A. (2012). Measuring ecological niche overlap from occurrence and spatial environmental data. Global Ecology and Biogeography, 21(4), 481-497.
+
